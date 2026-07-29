@@ -247,6 +247,7 @@ async def cmd_help(message: Message):
         "/base — список всех обратившихся и их этап\n"
         "/export — выгрузка всех клиентов в CSV\n"
         "/broadcast <текст> — рассылка сообщения всем клиентам\n"
+        "/wipe — очистить всю базу клиентов (с подтверждением)\n"
         "/whoami — узнать свой ID\n\n"
         "В общем чате: <b>reply</b> на заявку — ответ уходит клиенту; "
         "кнопка «Взять в работу» закрепляет лида."
@@ -336,6 +337,35 @@ async def on_broadcast_confirm(cb: CallbackQuery, bot: Bot):
     await cb.message.answer(f"Готово ✅\nДоставлено: {ok}\nНе доставлено: {fail}")
 
 
+@router.message(Command("wipe"))
+async def cmd_wipe(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚠️ Да, очистить всё", callback_data="wipe:yes"),
+        InlineKeyboardButton(text="Отмена", callback_data="wipe:no"),
+    ]])
+    await message.answer(
+        "Очистить <b>всю базу клиентов</b>? Удалятся все лиды и их этапы <b>безвозвратно</b>.\n"
+        "(Список администраторов сохранится.)",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("wipe:"))
+async def on_wipe(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    if cb.data.split(":", 1)[1] == "no":
+        await cb.message.edit_text("Очистка отменена.")
+        await cb.answer()
+        return
+    n = db.wipe()
+    await cb.message.edit_text(f"База очищена ✅\nУдалено записей: {n}")
+    await cb.answer("Готово")
+
+
 # ---------------- меню команд ----------------
 
 CLIENT_CMDS = [BotCommand(command="start", description="Начать")]
@@ -343,6 +373,7 @@ ADMIN_CMDS = [
     BotCommand(command="base", description="📋 База заявок и этапы"),
     BotCommand(command="export", description="📥 Выгрузка в CSV"),
     BotCommand(command="broadcast", description="📤 Рассылка клиентам"),
+    BotCommand(command="wipe", description="🗑 Очистить базу"),
     BotCommand(command="whoami", description="🆔 Мой ID и права"),
     BotCommand(command="help", description="❓ Помощь"),
 ]

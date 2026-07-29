@@ -133,6 +133,13 @@ def broadcast_targets():
     return [r["user_id"] for r in _all("SELECT user_id FROM users")]
 
 
+def wipe() -> int:
+    """Полная очистка базы клиентов (лиды + связки сообщений). Админы сохраняются."""
+    n = _one("SELECT count(*) AS n FROM users")["n"]
+    _exec("TRUNCATE users, lead_messages")
+    return n
+
+
 # ---------- связка сообщений группы с лидом (для reply) ----------
 
 def link_message(group_message_id: int, user_id: int) -> None:
