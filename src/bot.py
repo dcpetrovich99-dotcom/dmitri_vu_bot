@@ -34,6 +34,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
+import content
 import db
 from config import ADMIN_CHAT_ID, ADMIN_IDS, ADMIN_SECRET, BOT_TOKEN, SPECIALIST_NAME
 
@@ -105,6 +106,27 @@ def lead_keyboard(row) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def menu_kb(screen_id: str) -> InlineKeyboardMarkup:
+    """Собирает inline-клавиатуру экрана из content.SCREENS."""
+    rows = content.SCREENS[screen_id]["rows"]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=cb) for label, cb in row]
+        for row in rows
+    ])
+
+
+async def show_screen(message: Message, screen_id: str, edit: bool) -> None:
+    """Показывает экран меню: правит текущее сообщение либо отправляет новое."""
+    scr = content.SCREENS[screen_id]
+    if edit:
+        try:
+            await message.edit_text(scr["text"], reply_markup=menu_kb(screen_id))
+            return
+        except Exception:  # noqa: BLE001 — сообщение нельзя отредактировать
+            pass
+    await message.answer(scr["text"], reply_markup=menu_kb(screen_id))
+
+
 def contact_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -124,17 +146,89 @@ async def push_lead_to_group(bot: Bot, user_id: int) -> None:
     db.link_message(sent.message_id, user_id)
 
 
-# ---------------- клиентский поток (личка) ----------------
+# ---------------- клиентский поток: меню и навигация ----------------
 
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def on_start(message: Message, state: FSMContext):
+    await state.clear()
     u = message.from_user
     db.upsert_start(u.id, u.username, u.first_name, u.last_name)
+    greeting = f"Здравствуйте, {esc(u.first_name)}!" if u.first_name else "Здравствуйте!"
+    await message.answer(f"{greeting}\n\n{content.WELCOME_BODY}", reply_markup=menu_kb("main"))
+
+
+@router.message(Command("menu"), F.chat.type == ChatType.PRIVATE)
+async def on_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(content.SCREENS["main"]["text"], reply_markup=menu_kb("main"))
+
+
+@router.callback_query(F.data.startswith("nav:"))
+async def on_nav(cb: CallbackQuery, state: FSMContext):
+    await state.clear()  # выход из анкеты, если пользователь был в ней
+    screen_id = cb.data.split(":", 1)[1]
+    if screen_id not in content.SCREENS:
+        await cb.answer()
+        return
+    await show_screen(cb.message, screen_id, edit=True)
+    await cb.answer()
+
+
+# ---------------- тест по ПДД ----------------
+
+def quiz_kb(q_index: int, score: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=opt, callback_data=f"qz:a:{q_index}:{i}:{score}")]
+        for i, opt in enumerate(content.QUIZ[q_index]["options"])
+    ]
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def quiz_text(q_index: int) -> str:
+    total = len(content.QUIZ)
+    q = content.QUIZ[q_index]
+    return f"Вопрос {q_index + 1} из {total}\n\n{q['q']}"
+
+
+@router.callback_query(F.data == "qz:start")
+async def on_quiz_start(cb: CallbackQuery):
+    try:
+        await cb.message.edit_text(quiz_text(0), reply_markup=quiz_kb(0, 0))
+    except Exception:  # noqa: BLE001
+        await cb.message.answer(quiz_text(0), reply_markup=quiz_kb(0, 0))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("qz:a:"))
+async def on_quiz_answer(cb: CallbackQuery):
+    _, _, q_idx, chosen, score = cb.data.split(":")
+    q_idx, chosen, score = int(q_idx), int(chosen), int(score)
+    q = content.QUIZ[q_idx]
+    correct = chosen == q["correct"]
+    if correct:
+        score += 1
+    await cb.answer(("Верно. " if correct else "Неверно. ") + q["note"], show_alert=False)
+
+    nxt = q_idx + 1
+    if nxt < len(content.QUIZ):
+        await cb.message.edit_text(quiz_text(nxt), reply_markup=quiz_kb(nxt, score))
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Оставить заявку", callback_data="lead:start")],
+            [InlineKeyboardButton(text="Пройти ещё раз", callback_data="qz:start"),
+             InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:main")],
+        ])
+        await cb.message.edit_text(content.quiz_result(score), reply_markup=kb)
+
+
+# ---------------- заявка (после контента) ----------------
+
+@router.callback_query(F.data == "lead:start")
+async def on_lead_start(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Lead.waiting_answer)
-    await message.answer(
-        f"Приветствую {esc(u.first_name)}! Спасибо что обратились к нам за помощью!\n"
-        "Подскажите как мы можем к Вам обращаться и с какого Вы города?"
-    )
+    await cb.message.answer(content.LEAD_PROMPT)
+    await cb.answer()
 
 
 @router.message(Lead.waiting_answer, F.chat.type == ChatType.PRIVATE, F.text, ~F.text.startswith("/"))
@@ -143,7 +237,9 @@ async def on_answer(message: Message, state: FSMContext, bot: Bot):
     db.save_answer(message.from_user.id, message.text, name, city)
     await state.clear()
     await message.answer(
-        f"Благодарю за ответ, наш специалист {SPECIALIST_NAME} сейчас с вами свяжется 🤝",
+        f"Благодарю за ответ. Наш специалист {SPECIALIST_NAME} свяжется с вами в "
+        "ближайшее время. 🤝\n"
+        "При желании можно поделиться номером телефона для связи.",
         reply_markup=contact_kb(),
     )
     await push_lead_to_group(bot, message.from_user.id)
@@ -151,11 +247,11 @@ async def on_answer(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.contact)
 async def on_contact(message: Message, bot: Bot):
-    # клиент поделился номером
     if message.contact.user_id and message.contact.user_id != message.from_user.id:
         return
     db.save_phone(message.from_user.id, message.contact.phone_number)
-    await message.answer("Спасибо! Данные приняты ✅", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Спасибо, данные приняты. ✅", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Можно вернуться в главное меню.", reply_markup=menu_kb("main"))
     await bot.send_message(
         ADMIN_CHAT_ID,
         f"📞 Клиент <code>{message.from_user.id}</code> оставил номер: "
@@ -165,23 +261,32 @@ async def on_contact(message: Message, bot: Bot):
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "Пропустить")
 async def on_skip(message: Message):
-    await message.answer("Хорошо, ожидайте связи со специалистом 🤝", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Хорошо. Специалист свяжется с вами по данным из профиля.",
+                         reply_markup=ReplyKeyboardRemove())
+    await message.answer("Можно вернуться в главное меню.", reply_markup=menu_kb("main"))
 
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text, ~F.text.startswith("/"))
 async def on_followup(message: Message, bot: Bot):
-    """Дальнейшие сообщения клиента (уже вне анкеты) — тоже пробрасываем в общий чат."""
+    """Свободный текст вне анкеты: подсказка с меню; для действующих лидов — релей в общий чат."""
     u = message.from_user
     row = db.get_user(u.id)
-    if not row:
-        db.upsert_start(u.id, u.username, u.first_name, u.last_name)
-    sent = await bot.send_message(
-        ADMIN_CHAT_ID,
-        f'💬 Сообщение от <a href="tg://user?id={u.id}">'
-        f"{esc(row['contact_name'] if row else u.first_name) or 'клиента'}</a>:\n"
-        f"{esc(message.text)}\n\n↩️ Ответить — reply на это сообщение.",
-    )
-    db.link_message(sent.message_id, u.id)
+    if row and row["stage"] in (db.STAGE_ANSWERED, db.STAGE_CONTACTED, db.STAGE_CLOSED):
+        sent = await bot.send_message(
+            ADMIN_CHAT_ID,
+            f'💬 Сообщение от <a href="tg://user?id={u.id}">'
+            f"{esc(row['contact_name']) or 'клиента'}</a>:\n"
+            f"{esc(message.text)}\n\n↩️ Ответить — reply на это сообщение.",
+        )
+        db.link_message(sent.message_id, u.id)
+        await message.answer("Сообщение передано специалисту.", reply_markup=menu_kb("main"))
+    else:
+        if not row:
+            db.upsert_start(u.id, u.username, u.first_name, u.last_name)
+        await message.answer(
+            "Ниже — основные разделы бота. Для консультации можно оставить заявку.",
+            reply_markup=menu_kb("main"),
+        )
 
 
 # ---------------- общий чат: reply -> клиенту, кнопка "взять" ----------------
@@ -368,7 +473,10 @@ async def on_wipe(cb: CallbackQuery):
 
 # ---------------- меню команд ----------------
 
-CLIENT_CMDS = [BotCommand(command="start", description="Начать")]
+CLIENT_CMDS = [
+    BotCommand(command="start", description="Начать"),
+    BotCommand(command="menu", description="Главное меню"),
+]
 ADMIN_CMDS = [
     BotCommand(command="base", description="📋 База заявок и этапы"),
     BotCommand(command="export", description="📥 Выгрузка в CSV"),
@@ -399,6 +507,11 @@ async def main():
     dp.include_router(router)
     me = await bot.get_me()
     await set_commands(bot)
+    try:
+        await bot.set_my_description(content.BOT_DESCRIPTION)
+        await bot.set_my_short_description(content.BOT_SHORT_DESCRIPTION)
+    except Exception as e:  # noqa: BLE001 — не критично для работы бота
+        log.warning("set_my_description не удалось: %s", e)
     log.info("Бот @%s запущен. Админов в env: %d", me.username, len(ADMIN_IDS))
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
