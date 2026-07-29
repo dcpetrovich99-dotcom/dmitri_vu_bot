@@ -183,6 +183,12 @@ async def on_start(message: Message, state: FSMContext):
     is_new = db.upsert_start(u.id, u.username, u.first_name, u.last_name)
     greeting = f"Здравствуйте, {esc(u.first_name)}!" if u.first_name else "Здравствуйте!"
     await message.answer(f"{greeting}\n\n{content.WELCOME_BODY}", reply_markup=menu_kb("main"))
+    if is_admin(u.id):
+        # проставляем меню админ-команд при первом открытии бота админом
+        try:
+            await message.bot.set_my_commands(ADMIN_CMDS, scope=BotCommandScopeChat(chat_id=u.id))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не удалось установить админ-меню: %s", e)
     if is_new:
         # новый пользователь -> сразу лид в общий чат, ему можно написать через reply
         try:
