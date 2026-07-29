@@ -85,7 +85,9 @@ def init() -> None:
 
 # ---------- users ----------
 
-def upsert_start(user_id: int, username, first_name, last_name) -> None:
+def upsert_start(user_id: int, username, first_name, last_name) -> bool:
+    """Создаёт/обновляет пользователя. Возвращает True, если это новый пользователь."""
+    is_new = _one("SELECT 1 AS e FROM users WHERE user_id=%s", (user_id,)) is None
     _exec(
         """INSERT INTO users (user_id, username, first_name, last_name, stage, created_at, updated_at)
            VALUES (%s,%s,%s,%s,%s,%s,%s)
@@ -96,6 +98,7 @@ def upsert_start(user_id: int, username, first_name, last_name) -> None:
                updated_at = EXCLUDED.updated_at""",
         (user_id, username, first_name, last_name, STAGE_STARTED, _now(), _now()),
     )
+    return is_new
 
 
 def save_answer(user_id: int, raw_answer: str, contact_name, city) -> None:

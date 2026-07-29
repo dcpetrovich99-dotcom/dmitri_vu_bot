@@ -106,12 +106,18 @@ def lead_keyboard(row) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def _button(label: str, target: str) -> InlineKeyboardButton:
+    # http/tg-ссылка -> URL-кнопка, иначе -> callback
+    if target.startswith(("http://", "https://", "tg://")):
+        return InlineKeyboardButton(text=label, url=target)
+    return InlineKeyboardButton(text=label, callback_data=target)
+
+
 def menu_kb(screen_id: str) -> InlineKeyboardMarkup:
     """Собирает inline-клавиатуру экрана из content.SCREENS."""
     rows = content.SCREENS[screen_id]["rows"]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label, callback_data=cb) for label, cb in row]
-        for row in rows
+        [_button(label, target) for label, target in row] for row in rows
     ])
 
 
@@ -146,15 +152,43 @@ async def push_lead_to_group(bot: Bot, user_id: int) -> None:
     db.link_message(sent.message_id, user_id)
 
 
+def start_card(row) -> str:
+    name = row["first_name"] or "—"
+    uname = f"@{row['username']}" if row["username"] else "нет username"
+    return "\n".join([
+        "🆕 <b>Новый лид</b> (запуск бота)",
+        f"👤 Имя: <b>{esc(name)}</b>",
+        f"🔗 Telegram: {esc(uname)}",
+        f'🔗 Профиль: <a href="tg://user?id={row["user_id"]}">открыть чат</a>',
+        f"🆔 <code>{row['user_id']}</code>",
+        "",
+        "↩️ Ответить клиенту — <b>reply на это сообщение</b>.",
+    ])
+
+
+async def push_start_to_group(bot: Bot, user_id: int) -> None:
+    row = db.get_user(user_id)
+    if not row:
+        return
+    sent = await bot.send_message(ADMIN_CHAT_ID, start_card(row), reply_markup=lead_keyboard(row))
+    db.link_message(sent.message_id, user_id)
+
+
 # ---------------- клиентский поток: меню и навигация ----------------
 
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def on_start(message: Message, state: FSMContext):
     await state.clear()
     u = message.from_user
-    db.upsert_start(u.id, u.username, u.first_name, u.last_name)
+    is_new = db.upsert_start(u.id, u.username, u.first_name, u.last_name)
     greeting = f"Здравствуйте, {esc(u.first_name)}!" if u.first_name else "Здравствуйте!"
     await message.answer(f"{greeting}\n\n{content.WELCOME_BODY}", reply_markup=menu_kb("main"))
+    if is_new:
+        # новый пользователь -> сразу лид в общий чат, ему можно написать через reply
+        try:
+            await push_start_to_group(message.bot, u.id)
+        except Exception as e:  # noqa: BLE001 — бот не в группе / нет прав
+            log.warning("Не удалось отправить лид в общий чат: %s", e)
 
 
 @router.message(Command("menu"), F.chat.type == ChatType.PRIVATE)
@@ -191,6 +225,12 @@ def quiz_text(q_index: int) -> str:
     return f"Вопрос {q_index + 1} из {total}\n\n{q['q']}"
 
 
+@router.message(Command("test"), F.chat.type == ChatType.PRIVATE)
+async def on_test(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(quiz_text(0), reply_markup=quiz_kb(0, 0))
+
+
 @router.callback_query(F.data == "qz:start")
 async def on_quiz_start(cb: CallbackQuery):
     try:
@@ -215,7 +255,7 @@ async def on_quiz_answer(cb: CallbackQuery):
         await cb.message.edit_text(quiz_text(nxt), reply_markup=quiz_kb(nxt, score))
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Оставить заявку", callback_data="lead:start")],
+            [InlineKeyboardButton(text="Получить консультацию", callback_data="lead:start")],
             [InlineKeyboardButton(text="Пройти ещё раз", callback_data="qz:start"),
              InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:main")],
         ])
@@ -476,6 +516,7 @@ async def on_wipe(cb: CallbackQuery):
 CLIENT_CMDS = [
     BotCommand(command="start", description="Начать"),
     BotCommand(command="menu", description="Главное меню"),
+    BotCommand(command="test", description="Тест по ПДД"),
 ]
 ADMIN_CMDS = [
     BotCommand(command="base", description="📋 База заявок и этапы"),
