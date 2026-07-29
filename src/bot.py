@@ -225,12 +225,6 @@ def quiz_text(q_index: int) -> str:
     return f"Вопрос {q_index + 1} из {total}\n\n{q['q']}"
 
 
-@router.message(Command("test"), F.chat.type == ChatType.PRIVATE)
-async def on_test(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(quiz_text(0), reply_markup=quiz_kb(0, 0))
-
-
 @router.callback_query(F.data == "qz:start")
 async def on_quiz_start(cb: CallbackQuery):
     try:
@@ -255,7 +249,7 @@ async def on_quiz_answer(cb: CallbackQuery):
         await cb.message.edit_text(quiz_text(nxt), reply_markup=quiz_kb(nxt, score))
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Получить консультацию", callback_data="lead:start")],
+            [InlineKeyboardButton(text="Оставить заявку", callback_data="lead:start")],
             [InlineKeyboardButton(text="Пройти ещё раз", callback_data="qz:start"),
              InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:main")],
         ])
@@ -516,7 +510,6 @@ async def on_wipe(cb: CallbackQuery):
 CLIENT_CMDS = [
     BotCommand(command="start", description="Начать"),
     BotCommand(command="menu", description="Главное меню"),
-    BotCommand(command="test", description="Тест по ПДД"),
 ]
 ADMIN_CMDS = [
     BotCommand(command="base", description="📋 База заявок и этапы"),
