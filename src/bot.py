@@ -21,6 +21,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
     BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
@@ -134,7 +137,7 @@ async def on_start(message: Message, state: FSMContext):
     )
 
 
-@router.message(Lead.waiting_answer, F.chat.type == ChatType.PRIVATE, F.text)
+@router.message(Lead.waiting_answer, F.chat.type == ChatType.PRIVATE, F.text, ~F.text.startswith("/"))
 async def on_answer(message: Message, state: FSMContext, bot: Bot):
     name, city = parse_answer(message.text)
     db.save_answer(message.from_user.id, message.text, name, city)
@@ -231,6 +234,7 @@ async def cmd_admin(message: Message):
     if len(parts) != 2 or not ADMIN_SECRET or parts[1].strip() != ADMIN_SECRET:
         return  # молча игнорируем — чтобы не палить наличие команды
     db.add_admin(message.from_user.id, message.from_user.username)
+    await set_commands(message.bot)  # показать этому админу меню админ-команд
     await message.answer("Готово. Вы теперь администратор ✅\nКоманды: /help")
 
 
@@ -332,6 +336,29 @@ async def on_broadcast_confirm(cb: CallbackQuery, bot: Bot):
     await cb.message.answer(f"Готово ✅\nДоставлено: {ok}\nНе доставлено: {fail}")
 
 
+# ---------------- меню команд ----------------
+
+CLIENT_CMDS = [BotCommand(command="start", description="Начать")]
+ADMIN_CMDS = [
+    BotCommand(command="base", description="📋 База заявок и этапы"),
+    BotCommand(command="export", description="📥 Выгрузка в CSV"),
+    BotCommand(command="broadcast", description="📤 Рассылка клиентам"),
+    BotCommand(command="whoami", description="🆔 Мой ID и права"),
+    BotCommand(command="help", description="❓ Помощь"),
+]
+
+
+async def set_commands(bot: Bot) -> None:
+    """Клиенты видят только /start; админы (и общий чат) — полный список."""
+    await bot.set_my_commands(CLIENT_CMDS, scope=BotCommandScopeDefault())
+    targets = (set(ADMIN_IDS) | db.db_admin_ids()) | {ADMIN_CHAT_ID}
+    for chat_id in targets:
+        try:
+            await bot.set_my_commands(ADMIN_CMDS, scope=BotCommandScopeChat(chat_id=chat_id))
+        except Exception as e:  # noqa: BLE001 — админ ещё не открывал бота / бот не в группе
+            log.warning("set_my_commands для %s не удалось: %s", chat_id, e)
+
+
 # ---------------- запуск ----------------
 
 async def main():
@@ -340,6 +367,7 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     me = await bot.get_me()
+    await set_commands(bot)
     log.info("Бот @%s запущен. Админов в env: %d", me.username, len(ADMIN_IDS))
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
